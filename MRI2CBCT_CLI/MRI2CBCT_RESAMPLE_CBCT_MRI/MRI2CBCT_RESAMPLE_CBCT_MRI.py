@@ -3,7 +3,7 @@
 import csv
 import argparse
 import os
-
+import time
 import sys
 fpath = os.path.join(os.path.dirname(__file__), "..")
 sys.path.append(fpath)
@@ -60,22 +60,35 @@ def transform_size(size_str):
     
     return size_transformed
             
-def main(input_folder,output_folder,resample_size,spacing,iso_spacing):
+def main(input_folder,output_folder,resample_size,spacing,center,iso_spacing,is_seg=False):
     csv_path = create_csv(input_folder,output_folder,output_csv=output_folder,name_csv="resample_csv.csv")
     
     with open(csv_path, mode='r') as csv_file:
         csv_reader = csv.DictReader(csv_file)
-        for row in csv_reader:
+        rows = list(csv_reader)
+        total_patients = len(rows)
+        patient_count = 0
+        for row in rows:
             size_file = tuple(map(int, row["size"].strip("()").split(",")))
             spacing_file = tuple(map(float, row["Spacing"].strip("()").split(",")))
             input_path = row["in"]
             out_path = row["out"]
+            linear = False if is_seg else True
+            center = 1 if center == "True" else 0
+            
             if resample_size != "None" and spacing=="None" :
-                run_resample(img=input_path,out=out_path,size=list(map(int, resample_size.split(','))),fit_spacing=True,center=0,iso_spacing=False,linear=False,image_dimension=3,pixel_dimension=1,rgb=False,ow=0)
+                run_resample(img=input_path,out=out_path,size=list(map(int, resample_size.split(','))),fit_spacing=True,center=center,iso_spacing=False,linear=linear,image_dimension=3,pixel_dimension=1,rgb=False,ow=0)
             elif resample_size == "None" and spacing!="None" :
-                run_resample(img=input_path,out=out_path,spacing=list(map(float, spacing.split(','))),size=[size_file[0],size_file[1],size_file[2]],fit_spacing=False,center=0,iso_spacing=False,linear=False,image_dimension=3,pixel_dimension=1,rgb=False,ow=0)
+                run_resample(img=input_path,out=out_path,spacing=list(map(float, spacing.split(','))),size=[size_file[0],size_file[1],size_file[2]],fit_spacing=False,center=center,iso_spacing=False,linear=linear,image_dimension=3,pixel_dimension=1,rgb=False,ow=0)
             elif resample_size != "None" and spacing!="None" :
-                run_resample(img=input_path,out=out_path,spacing=list(map(float, spacing.split(','))),size=list(map(int, resample_size.split(','))),fit_spacing=True,center=0,iso_spacing=False,linear=False,image_dimension=3,pixel_dimension=1,rgb=False,ow=0)
+                run_resample(img=input_path,out=out_path,spacing=list(map(float, spacing.split(','))),size=list(map(int, resample_size.split(','))),fit_spacing=True,center=center,iso_spacing=False,linear=linear,image_dimension=3,pixel_dimension=1,rgb=False,ow=0)
+                
+            if total_patients > 0:
+                patient_count += 1
+                progress = patient_count / total_patients
+                print(f"<filter-progress>{progress}</filter-progress>")
+                sys.stdout.flush()
+                time.sleep(0.5)
             
     delete_csv(csv_path)
     
@@ -96,14 +109,32 @@ def delete_csv(file_path):
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description='Get nifti info')
     parser.add_argument('input_folder_MRI', type=str, help='Input path')
+    parser.add_argument('input_folder_T2_MRI', type=str, help='Input path for T2_MRI')
     parser.add_argument('input_folder_CBCT', type=str, help='Input path')
+    parser.add_argument('input_folder_T2_CBCT', type=str, help='Input path for T2_CBCT')
+    parser.add_argument('input_folder_Seg', type=str, help='Input path for Seg')
+    parser.add_argument('input_folder_T2_Seg', type=str, help='Input path for T2_Seg')
     parser.add_argument('output_folder', type=str, help='Output path')
     parser.add_argument('resample_size', type=str, help='size_resample')
     parser.add_argument('spacing', type=str, help='size_resample')
+    parser.add_argument('center', type=str, help='center the image')
     args = parser.parse_args()
 
 
     if os.path.isdir(args.input_folder_MRI):
-        main(args.input_folder_MRI,args.output_folder,args.resample_size,args.spacing,iso_spacing=True)
+        mri_output_folder = os.path.join(args.output_folder, "MRI")
+        main(args.input_folder_MRI,mri_output_folder,args.resample_size,args.spacing,args.center,iso_spacing=True)
+    if os.path.isdir(args.input_folder_T2_MRI):
+        main(args.input_folder_T2_MRI,mri_output_folder,args.resample_size,args.spacing,args.center,iso_spacing=True)
+        
     if os.path.isdir(args.input_folder_CBCT):
-        main(args.input_folder_CBCT,args.output_folder,args.resample_size,args.spacing,iso_spacing=False)
+        cbct_output_folder = os.path.join(args.output_folder, "CBCT")
+        main(args.input_folder_CBCT,cbct_output_folder,args.resample_size,args.spacing,args.center,iso_spacing=False)
+    if os.path.isdir(args.input_folder_T2_CBCT):
+        main(args.input_folder_T2_CBCT,cbct_output_folder,args.resample_size,args.spacing,args.center,iso_spacing=False)
+        
+    if os.path.isdir(args.input_folder_Seg):
+        seg_output_folder = os.path.join(args.output_folder, "Seg")
+        main(args.input_folder_Seg,seg_output_folder,args.resample_size,args.spacing,args.center,iso_spacing=False, is_seg=True)
+    if os.path.isdir(args.input_folder_T2_Seg):
+        main(args.input_folder_T2_Seg,seg_output_folder,args.resample_size,args.spacing,args.center,iso_spacing=False, is_seg=True)

@@ -7,6 +7,7 @@ from MRI2CBCT_utils.Preprocess_CBCT import Process_CBCT
 from MRI2CBCT_utils.Preprocess_MRI import Process_MRI
 from MRI2CBCT_utils.Preprocess_CBCT_MRI import Preprocess_CBCT_MRI
 from MRI2CBCT_utils.Reg_MRI2CBCT import Registration_MRI2CBCT
+from MRI2CBCT_utils.Approx_MRI2CBCT import Approximation_MRI2CBCT
 import time 
 
 
@@ -41,7 +42,7 @@ def check_lib_installed(lib_name, required_version=None):
 # import csv
     
 def install_function():
-    libs = [('dicom2nifti',None),('itk',None),('monai','0.7.0'),('einops',None),('nibabel',None),('itk-elastix',None),('connected-components-3d','3.9.1'),("pandas",None)]
+    libs = [('itk',None),('monai','0.7.0'),('einops',None),('dicom2nifti', '2.3.0'),('pydicom', '2.2.2'),('nibabel',None),('itk-elastix',None),('connected-components-3d','3.9.1'),("pandas",None),("scikit-learn",None),("torch",None),("torchreg",None),("SimpleITK",None)]
     libs_to_install = []
     for lib, version in libs:
         if not check_lib_installed(lib, version):
@@ -60,7 +61,6 @@ def install_function():
         else :
           return False
     import vtk
-    import dicom2nifti
     import itk
     import cc3d
     return True
@@ -190,6 +190,7 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.minus_checked_rows = set()
         self._parameterNode = None
         self._parameterNodeGuiTag = None
+        self.processWasCanceled = False
         
         
 
@@ -224,6 +225,7 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.preprocess_mri = Process_MRI(self)
         self.preprocess_mri_cbct = Preprocess_CBCT_MRI(self)
         self.registration_mri2cbct = Registration_MRI2CBCT(self)
+        self.approximate_mri2cbct = Approximation_MRI2CBCT(self)
 
         # Connections
         #        LineEditOutputReg
@@ -232,12 +234,39 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.addObserver(slicer.mrmlScene, slicer.mrmlScene.EndCloseEvent, self.onSceneEndClose)
 
         # Buttons
+        self.ui.pushButtonApproximateMRI.connect("clicked(bool)", self.approximateMRI)
+        self.ui.SearchButtonApproxCBCT.connect("clicked(bool)",partial(self.openFinder,"InputCBCTApprox"))
+        self.ui.SearchButtonApproxMRI.connect("clicked(bool)",partial(self.openFinder,"InputMRIApprox"))
+        self.ui.SearchButtonOutputApprox.connect("clicked(bool)",partial(self.openFinder,"OutputApprox"))
+        # self.ui.SearchButtonMeanCBCT.connect("clicked(bool)",partial(self.openFinder,"MeanCBCTApprox"))
+        # self.ui.SearchButtonROI.connect("clicked(bool)",partial(self.openFinder,"ROIApprox"))
+        # self.ui.DownloadButtonMeanCBCT.connect("clicked(bool)",partial(self.downloadModel,self.ui.lineEditMeanCBCT, "MeanCBCT", True))
+        # self.ui.DownloadButtonROI.connect("clicked(bool)",partial(self.downloadModel,self.ui.lineEditROI, "ROI", True))
+        self.ui.pushButtonCancelProcess.connect("clicked(bool)", self.onCancel)
+        
         self.ui.registrationButton.connect("clicked(bool)", self.registration_MR2CBCT)
         self.ui.SearchButtonCBCT.connect("clicked(bool)",partial(self.openFinder,"InputCBCT"))
         self.ui.SearchButtonMRI.connect("clicked(bool)",partial(self.openFinder,"InputMRI"))
         self.ui.SearchButtonRegMRI.connect("clicked(bool)",partial(self.openFinder,"InputRegMRI"))
         self.ui.SearchButtonRegCBCT.connect("clicked(bool)",partial(self.openFinder,"InputRegCBCT"))
         self.ui.SearchButtonRegLabel.connect("clicked(bool)",partial(self.openFinder,"InputRegLabel"))
+        self.ui.SearchButtonResampleCBCT.connect("clicked(bool)",partial(self.openFinder,"InputResampleCBCT"))
+        self.ui.SearchButtonResampleMRI.connect("clicked(bool)",partial(self.openFinder,"InputResampleMRI"))
+        self.ui.SearchButtonResampleSeg.connect("clicked(bool)",partial(self.openFinder,"InputResampleSeg"))
+        self.ui.SearchButtonResampleT2CBCT.connect("clicked(bool)",partial(self.openFinder,"InputResampleT2CBCT"))
+        self.ui.SearchButtonResampleT2MRI.connect("clicked(bool)",partial(self.openFinder,"InputResampleT2MRI"))
+        self.ui.SearchButtonResampleT2Seg.connect("clicked(bool)",partial(self.openFinder,"InputResampleT2Seg"))
+        self.ui.lineEditResampleCBCT.textChanged.connect(self.updateResamplingLabel)
+        self.ui.lineEditResampleT2CBCT.textChanged.connect(self.updateResamplingLabel)
+        self.ui.lineEditResampleMRI.textChanged.connect(self.updateResamplingLabel)
+        self.ui.lineEditResampleT2MRI.textChanged.connect(self.updateResamplingLabel)
+        self.ui.lineEditResampleSeg.textChanged.connect(self.updateResamplingLabel)
+        self.ui.lineEditResampleT2Seg.textChanged.connect(self.updateResamplingLabel)
+        
+        self.ui.CheckBoxT2CBCT.connect("clicked(bool)",self.toggleT2)
+        self.ui.CheckBoxT2MRI.connect("clicked(bool)",self.toggleT2)
+        self.ui.CheckBoxT2Seg.connect("clicked(bool)",self.toggleT2)
+        
         self.ui.SearchOutputFolderOrientCBCT.connect("clicked(bool)",partial(self.openFinder,"OutputOrientCBCT"))
         self.ui.SearchOutputFolderOrientMRI.connect("clicked(bool)",partial(self.openFinder,"OutputOrientMRI"))
         self.ui.SearchOutputFolderResample.connect("clicked(bool)",partial(self.openFinder,"OutputOrientResample"))
@@ -260,6 +289,17 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.ComboBoxCBCT.setEnabled(False)
         self.ui.ComboBoxMRI.setCurrentIndex(1)
         self.ui.ComboBoxMRI.setEnabled(False)
+        
+        self.ui.labelT2CBCT.setVisible(False)
+        self.ui.lineEditResampleT2CBCT.setVisible(False)
+        self.ui.SearchButtonResampleT2CBCT.setVisible(False)
+        self.ui.labelT2MRI.setVisible(False)
+        self.ui.lineEditResampleT2MRI.setVisible(False)
+        self.ui.SearchButtonResampleT2MRI.setVisible(False)
+        self.ui.labelT2Seg.setVisible(False)
+        self.ui.lineEditResampleT2Seg.setVisible(False)
+        self.ui.SearchButtonResampleT2Seg.setVisible(False)
+        
         self.ui.comboBoxRegMRI.setCurrentIndex(1)
         self.ui.comboBoxRegMRI.setEnabled(False)
         self.ui.comboBoxRegCBCT.setCurrentIndex(1)
@@ -279,9 +319,13 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         
         self.ui.outputCollapsibleButton.setText("Registration")
         self.ui.inputsCollapsibleButton.setText("Preprocess")
+        self.ui.approxCollapsibleButton.setText("Approximate")
         
         self.ui.outputCollapsibleButton.setChecked(True)  # True to expand, False to collapse
-        self.ui.inputsCollapsibleButton.setChecked(False) 
+        self.ui.inputsCollapsibleButton.setChecked(False)
+        self.ui.approxCollapsibleButton.setChecked(True)
+        
+        self.ui.pushButtonCancelProcess.setVisible(False)
         ##################################################################################################
         ### Orientation Table
         self.tableWidgetOrient = self.ui.tableWidgetOrient
@@ -374,7 +418,7 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # Add QSpinBoxes for the first row
         spinBox1 = QSpinBox()
         spinBox1.setMaximum(10000)
-        spinBox1.setValue(119)
+        spinBox1.setValue(443)
         self.tableWidgetResample.setCellWidget(0, 0, spinBox1)
 
         spinBox2 = QSpinBox()
@@ -384,7 +428,7 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         spinBox3 = QSpinBox()
         spinBox3.setMaximum(10000)
-        spinBox3.setValue(443)
+        spinBox3.setValue(119)
         self.tableWidgetResample.setCellWidget(0, 2, spinBox3)
 
         # Add QSpinBoxes for the new row
@@ -763,6 +807,30 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             else :
                 surface_folder = QFileDialog.getOpenFileName(self.parent,'Open a file',)
             self.ui.lineEditRegLabel.setText(surface_folder)
+            
+        elif nom=="InputResampleCBCT":
+            surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+            self.ui.lineEditResampleCBCT.setText(surface_folder)
+            
+        elif nom=="InputResampleT2CBCT":
+            surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+            self.ui.lineEditResampleT2CBCT.setText(surface_folder)
+            
+        elif nom=="InputResampleMRI":
+            surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+            self.ui.lineEditResampleMRI.setText(surface_folder)
+            
+        elif nom=="InputResampleT2MRI":
+            surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+            self.ui.lineEditResampleT2MRI.setText(surface_folder)
+            
+        elif nom=="InputResampleSeg":
+            surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+            self.ui.lineEditResampleSeg.setText(surface_folder)
+            
+        elif nom=="InputResampleT2Seg":
+            surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+            self.ui.lineEditResampleT2Seg.setText(surface_folder)
  
 
         elif nom=="OutputOrientCBCT":
@@ -780,6 +848,26 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         elif nom=="OutputReg":
             surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
             self.ui.LineEditOutput.setText(surface_folder)
+            
+        elif nom=="InputCBCTApprox":
+            surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+            self.ui.lineEditApproxCBCT.setText(surface_folder)
+            
+        elif nom=="InputMRIApprox":
+            surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+            self.ui.lineEditApproxMRI.setText(surface_folder)
+            
+        # elif nom=="MeanCBCTApprox":
+        #     surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+        #     self.ui.lineEditMeanCBCT.setText(surface_folder)
+            
+        # elif nom=="ROIApprox":
+        #     surface_folder = QFileDialog.getOpenFileName(self.parent,'Open a file',)
+        #     self.ui.lineEditROI.setText(surface_folder)
+            
+        elif nom=="OutputApprox":
+            surface_folder = QFileDialog.getExistingDirectory(self.parent, "Select a scan folder")
+            self.ui.lineEditOutputApprox.setText(surface_folder)
 
         
         
@@ -836,6 +924,23 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
                 else:
                     lineEdit.setText(model_folder)
+                    
+        elif name == "MeanCBCT" or name == "ROI":
+            listmodel = self.approximate_mri2cbct.getModelUrl()
+            print("listmodel : ", listmodel)
+
+            urls = listmodel[name]
+            if isinstance(urls, str):
+                url = urls
+                _ = self.DownloadUnzip(
+                    url=url,
+                    directory=os.path.join(self.SlicerDownloadPath),
+                    folder_name=os.path.join("Models", name),
+                    num_downl=1,
+                    total_downloads=1,
+                )
+                model_folder = os.path.join(self.SlicerDownloadPath, "Models", name)
+               
         else :
             url = "https://github.com/DCBIA-OrthoLab/SlicerAutomatedDentalTools/releases/download/test_files/TestFile.zip"
 
@@ -1043,21 +1148,35 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         passing, and process initiation, including setting up observers for process updates.
         """
         install_function()
-        if self.ui.comboBoxResample.currentText=="CBCT":
-            LineEditMRI = "None"
-            LineEditCBCT = self.ui.LineEditCBCT.text
-        elif self.ui.comboBoxResample.currentText=="MRI":
-            LineEditMRI = self.ui.LineEditMRI.text
-            LineEditCBCT = "None"
-        else : 
-            LineEditMRI = self.ui.LineEditMRI.text
-            LineEditCBCT = self.ui.LineEditCBCT.text
+        LineEditMRI = "None"
+        LineEditT2MRI = "None"
+        LineEditCBCT = "None"
+        LineEditT2CBCT = "None"
+        LineEditSeg = "None"
+        LineEditT2Seg = "None"
+        if self.ui.lineEditResampleMRI.text != "":
+            LineEditMRI = self.ui.lineEditResampleMRI.text
+        if self.ui.lineEditResampleT2MRI.text != "" and self.ui.CheckBoxT2MRI.isChecked():
+            LineEditT2MRI = self.ui.lineEditResampleT2MRI.text
+        if self.ui.lineEditResampleCBCT.text != "":
+            LineEditCBCT = self.ui.lineEditResampleCBCT.text
+        if self.ui.lineEditResampleT2CBCT.text != "" and self.ui.CheckBoxT2CBCT.isChecked():
+            LineEditT2CBCT = self.ui.lineEditResampleT2CBCT.text
+        if self.ui.lineEditResampleSeg.text != "":
+            LineEditSeg = self.ui.lineEditResampleSeg.text
+        if self.ui.lineEditResampleT2Seg.text != "" and self.ui.CheckBoxT2Seg.isChecked():
+            LineEditT2Seg = self.ui.lineEditResampleT2Seg.text
             
         param = {"input_folder_MRI": LineEditMRI,
+            "input_folder_T2_MRI": LineEditT2MRI,
             "input_folder_CBCT": LineEditCBCT,
+            "input_folder_T2_CBCT": LineEditT2CBCT,
+            "input_folder_Seg": LineEditSeg,
+            "input_folder_T2_Seg": LineEditT2Seg,
             "output_folder": self.ui.lineEditOuputResample.text,
             "resample_size": self.get_resample_values()[0],
-            "spacing" : self.get_resample_values()[1]
+            "spacing": self.get_resample_values()[1],
+            "center": str(self.ui.checkBoxCenterImage.isChecked()),
         }
             
         ok,mess = self.preprocess_mri_cbct.TestProcess(**param) 
@@ -1066,18 +1185,50 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
             return
         
         ok,mess = self.preprocess_mri_cbct.TestScan(param["input_folder_MRI"])
-
         if not ok : 
-            mess = mess + "MRI folder"
+            if self.ui.CheckBoxT2MRI.isChecked():
+                mess = mess + "MRI T1 folder"
+            else:
+                mess = mess + "MRI folder"
+            self.showMessage(mess)
+            return
+        
+        ok,mess = self.preprocess_mri_cbct.TestScan(param["input_folder_T2_MRI"])
+        if not ok :
+            mess = mess + "MRI T2 folder"
             self.showMessage(mess)
             return
         
         ok,mess = self.preprocess_mri_cbct.TestScan(param["input_folder_CBCT"])
         if not ok : 
-            mess = mess + "CBCT folder"
+            if self.ui.CheckBoxT2CBCT.isChecked():
+                mess = mess + "CBCT T1 folder"
+            else:
+                mess = mess + "CBCT folder"
+            self.showMessage(mess)
+            return
+        
+        ok,mess = self.preprocess_mri_cbct.TestScan(param["input_folder_T2_CBCT"])
+        if not ok :
+            mess = mess + "CBCT T2 folder"
             self.showMessage(mess)
             return
             
+        ok,mess = self.preprocess_mri_cbct.TestScan(param["input_folder_Seg"])
+        if not ok :
+            if self.ui.CheckBoxT2Seg.isChecked():
+                mess = mess + "Seg T1 folder"
+            else: 
+                mess = mess + "Seg folder"
+            self.showMessage(mess)
+            return
+
+        ok,mess = self.preprocess_mri_cbct.TestScan(param["input_folder_T2_Seg"])
+        if not ok :
+            mess = mess + "Seg T2 folder"
+            self.showMessage(mess)
+            return
+        
             
         self.list_Processes_Parameters = self.preprocess_mri_cbct.Process(**param)
         
@@ -1100,6 +1251,75 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         del self.list_Processes_Parameters[0]
         
+        
+    def updateResamplingLabel(self):
+        """
+        Updates the 'labelResampling' text dynamically based on which input folders are set.
+        """
+        selected = []
+        if self.ui.lineEditResampleCBCT.text.strip():
+            if self.ui.lineEditResampleT2CBCT.text.strip():
+                selected.append("CBCT T1&T2")
+            else:
+                selected.append("CBCT")
+        if self.ui.lineEditResampleMRI.text.strip():
+            if self.ui.lineEditResampleT2MRI.text.strip():
+                selected.append("MRI T1&T2")
+            else:
+                selected.append("MRI")
+                
+        if self.ui.lineEditResampleSeg.text.strip():
+            if self.ui.lineEditResampleT2Seg.text.strip():
+                selected.append("Seg T1&T2")
+            else:
+                selected.append("Seg")
+                
+        if selected:
+            self.ui.labelResampling.setText(f"<b>Running resampling for: {', '.join(selected)}</b>")
+        else:
+            self.ui.labelResampling.setText("No resampling selected")
+
+    def toggleT2(self):
+        if self.ui.CheckBoxT2CBCT.text == "T1 and T2 CBCT":
+            is_visible = False
+            if self.ui.CheckBoxT2CBCT.isChecked():
+                is_visible = True
+                self.ui.labelT1CBCT.setText("Input CBCT T1 folder:")
+            else:
+                self.ui.lineEditResampleT2CBCT.setText("")
+                self.ui.labelT1CBCT.setText("Input CBCT folder:")
+                
+            self.ui.labelT2CBCT.setVisible(is_visible)
+            self.ui.lineEditResampleT2CBCT.setVisible(is_visible)
+            self.ui.SearchButtonResampleT2CBCT.setVisible(is_visible)
+            
+        if self.ui.CheckBoxT2MRI.text == "T1 and T2 MRI":
+            is_visible = False
+            if self.ui.CheckBoxT2MRI.isChecked():
+                is_visible = True
+                self.ui.labelT1MRI.setText("Input MRI T1 folder:")
+            else:
+                self.ui.lineEditResampleT2MRI.setText("")
+                self.ui.labelT1MRI.setText("Input MRI folder:")
+                
+            self.ui.labelT2MRI.setVisible(is_visible)
+            self.ui.lineEditResampleT2MRI.setVisible(is_visible)
+            self.ui.SearchButtonResampleT2MRI.setVisible(is_visible)
+            
+        if self.ui.CheckBoxT2Seg.text == "T1 and T2 Seg":
+            is_visible = False
+            if self.ui.CheckBoxT2Seg.isChecked():
+                is_visible = True
+                self.ui.labelT1Seg.setText("Input Seg T1 folder:")
+            else:
+                self.ui.lineEditResampleT2Seg.setText("")
+                self.ui.labelT1Seg.setText("Input Seg folder:")
+                
+            self.ui.labelT2Seg.setVisible(is_visible)
+            self.ui.lineEditResampleT2Seg.setVisible(is_visible)
+            self.ui.SearchButtonResampleT2Seg.setVisible(is_visible)
+            
+            
         
     def registration_MR2CBCT(self) -> None:
         """
@@ -1167,7 +1387,67 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
 
         del self.list_Processes_Parameters[0]
         
+    def approximateMRI(self) -> None:
+        """
+        Approximates MRI images to CBCT images using specified parameters and initiate the processing pipeline.
+
+        This function sets up the parameters for MRI to CBCT registration, tests the process and scans,
+        and starts the processing pipeline if all checks pass. It handles the initial setup, parameter passing,
+        and process initiation, including setting up observers for process updates. The function also checks
+        for normalization parameters and validates input folders for the presence of necessary files.
+        """
+        install_function()
         
+        param = {"cbct_folder": self.ui.lineEditApproxCBCT.text,
+            "mri_folder": self.ui.lineEditApproxMRI.text,
+            "output_folder" : self.ui.lineEditOutputApprox.text}
+        
+        ok,mess = self.approximate_mri2cbct.TestProcess(**param) 
+        if not ok : 
+            self.showMessage(mess)
+            return
+        
+        ok1,mess = self.approximate_mri2cbct.TestScan(param["cbct_folder"])
+        ok2,mess2 = self.approximate_mri2cbct.TestScan(param["mri_folder"])
+        # ok3,mess3 = self.approximate_mri2cbct.TestScan(param["mean_folder"])
+        # ok4,mess4 = self.approximate_mri2cbct.TestScan(param["ROI_file"])
+        
+        error_messages = []
+
+        if not ok1:
+            error_messages.append("CBCT folder")
+        if not ok2:
+            error_messages.append("MRI folder")
+        # if not ok3:
+        #     error_messages.append("Mean folder")
+        # if not ok4:
+        #     error_messages.append("ROI file")
+
+        if error_messages:
+            error_message = "No files to run has been found in the following folders: " + ", ".join(error_messages)
+            self.showMessage(error_message)
+            return
+        
+        self.list_Processes_Parameters = self.approximate_mri2cbct.Process(**param)
+        
+        self.onProcessStarted()
+        
+        # /!\ Launch of the first process /!\
+        print("module name : ",self.list_Processes_Parameters[0]["Module"])
+        print("Parameters : ",self.list_Processes_Parameters[0]["Parameter"])
+        
+        self.process = slicer.cli.run(
+                self.list_Processes_Parameters[0]["Process"],
+                None,
+                self.list_Processes_Parameters[0]["Parameter"],
+            )
+        
+        self.module_name = self.list_Processes_Parameters[0]["Module"]
+        self.processObserver = self.process.AddObserver(
+            "ModifiedEvent", self.onProcessUpdate
+        )
+
+        del self.list_Processes_Parameters[0]   
         
     def onProcessStarted(self):
         """
@@ -1179,13 +1459,16 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         """
         self.startTime = time.time()
 
-        # self.ui.progressBar.setMaximum(self.nb_patient)
+        self.ui.progressBar.setHidden(False)
+        self.ui.progressBar.setMinimum(0)
+        self.ui.progressBar.setMaximum(100)
         self.ui.progressBar.setValue(0)
         self.ui.progressBar.setTextVisible(True)
-        self.ui.progressBar.setFormat("0%")
+        self.ui.progressBar.setFormat("%p%")
 
+        self.ui.label_info.setHidden(False)
         self.ui.label_info.setText(f"Starting process")
-        
+
         self.nb_extnesion_did = 0
         self.nb_extension_launch = len(self.list_Processes_Parameters)
 
@@ -1206,7 +1489,9 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         - event: The event that triggered the update.
         """
         
-        self.ui.progressBar.setVisible(False)
+        if not self.processWasCanceled:
+            self.ui.pushButtonCancelProcess.setVisible(True)
+        
         currentTime = time.time() - self.startTime
         if currentTime < 60:
             timer = f"Time: {int(currentTime)}s"
@@ -1219,21 +1504,18 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         # self.module_name = caller.GetModuleTitle() if self.module_name_bis is None else self.module_name_bis
         self.ui.label_info.setText(f"Extension {self.module_name} is running. \nNumber of extension runned: {self.nb_extnesion_did} / {self.nb_extension_launch}")
         # self.displayModule = self.displayModule_bis if self.displayModule_bis is not None else self.display[self.module_name.split(' ')[0]]
-
+        
+        progress_value = caller.GetProgress()
+        self.ui.progressBar.setValue(progress_value)
+        self.ui.progressBar.setFormat(f"{progress_value}%")
+        
         if self.module_name_before != self.module_name:
-            self.ui.progressBar.setValue(self.nb_extnesion_did/self.nb_extension_launch)
-            self.ui.progressBar.setFormat(f"{100*self.nb_extnesion_did/self.nb_extension_launch}%")
             self.nb_extnesion_did += 1
-            self.ui.label_info.setText(
-                f"Extension {self.module_name} is running. \nNumber of extension runned: {self.nb_extnesion_did} / {self.nb_extension_launch}"
-            )
-            
-
             self.module_name_before = self.module_name
             self.nb_change_bystep = 0
 
-
         if caller.GetStatus() & caller.Completed:
+            self.ui.pushButtonCancelProcess.setVisible(False)
             if caller.GetStatus() & caller.ErrorsMask:
                 # error
                 print("\n\n ========= PROCESSED ========= \n")
@@ -1315,8 +1597,10 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
        
         
     def onCancel(self):
+        self.processWasCanceled = True
         self.process.Cancel()
-
+        print("\n\n ========= PROCESS MANUALLY CANCELED ========= \n")
+        self.ui.label_info.setText("Process was canceled.")
         self.RunningUI(False)
         
     def RunningUI(self, run=False):
@@ -1324,6 +1608,7 @@ class MRI2CBCTWidget(ScriptedLoadableModuleWidget, VTKObservationMixin):
         self.ui.progressBar.setVisible(run)
         self.ui.label_time.setVisible(run)
         self.ui.label_info.setVisible(run)
+        self.ui.pushButtonCancelProcess.setVisible(run)
         
     def showMessage(self,mess):
         msg = QMessageBox()
